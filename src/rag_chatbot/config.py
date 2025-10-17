@@ -9,6 +9,6 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     
     class Config:
-        env_file = ".env"
+        env_file = ".env.dev"
 
 settings = Settings()
