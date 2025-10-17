@@ -1,7 +1,10 @@
+import os
 import chainlit as cl
 from langchain_google_genai import ChatGoogleGenerativeAI
 from rag_chatbot.config import settings 
 
+
+#cl.config.database_url = settings.database_url
 
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
