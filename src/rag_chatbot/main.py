@@ -1,179 +1,100 @@
 import chainlit as cl
-from langchain_google_genai import ChatGoogleGenerativeAI
-from rag_chatbot.config import settings
+from typing import Optional
+
+# Import agent components
+from rag_chatbot.agent.agent_factory import AgentManager
 from rag_chatbot.services.vector_service import VectorService
-from typing import List, Dict, Any
+from rag_chatbot.config import settings
 
 # Initialize services
-llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash",
-    google_api_key=settings.google_api_key,  
-    temperature=0.7
-)
-
 vector_service = VectorService()
-
-
-def format_retrieved_context(results: List[Dict[str, Any]]) -> str:
-    """Format retrieved documents with language-aware code blocks"""
-    if not results:
-        return "No relevant documents found."
-    
-    context_parts = []
-    for i, result in enumerate(results, 1):
-        metadata = result['metadata']
-        source_file = metadata.get('source_file', 'Unknown')
-        repo_name = metadata.get('repo_name', '')
-        language = metadata.get('language', '')
-        file_category = metadata.get('file_category', 'unknown')
-        content = result['content']
-        similarity = result['similarity']
-        
-        # Build source description
-        source_desc = f"{repo_name}/{source_file}" if repo_name else source_file
-        
-        # Format content based on type
-        if file_category == 'code' and language:
-            # Wrap code in language-specific markdown blocks
-            formatted_content = f"```{language}\n{content}\n```"
-        else:
-            formatted_content = content
-        
-        context_parts.append(
-            f"[Source {i}: {source_desc} ({file_category}) - relevance: {similarity:.2f}]\n{formatted_content}\n"
-        )
-    
-    return "\n---\n".join(context_parts)
-
-def detect_query_intent(query: str) -> Dict[str, Any]:
-    """Detect what the user is asking about"""
-    query_lower = query.lower()
-    
-    intent = {
-        'is_code_question': False,
-        'is_version_question': False,
-        'is_workflow_question': False,
-        'language_hints': [],
-        'search_boost': {}
-    }
-    
-    # Detect version questions
-    if any(word in query_lower for word in ['version', 'what version', 'which version']):
-        intent['is_version_question'] = True
-        intent['search_boost'] = {'file_category': 'code'}  # Prioritize code files
-    
-    # Detect workflow questions
-    if any(word in query_lower for word in ['workflow', 'task', 'wdl', 'pipeline']):
-        intent['is_workflow_question'] = True
-        intent['language_hints'] = ['wdl']
-    
-    # Detect code-specific questions
-    if any(word in query_lower for word in ['function', 'class', 'method', 'code', 'implementation']):
-        intent['is_code_question'] = True
-        intent['search_boost'] = {'file_category': 'code'}
-    
-    # Detect tool questions
-    if any(word in query_lower for word in ['tool', 'tools', 'software', 'markduplicates', 'picard', 'bwa']):
-        intent['is_code_question'] = True
-        intent['search_boost'] = {'file_category': 'code'}
-    
-    return intent
-
-def create_rag_prompt(user_question: str, context: str) -> str:
-    """Create a prompt that handles both documentation and code"""
-    return f"""You are a helpful technical assistant specializing in bioinformatics pipelines, workflows, and code.
-
-Use the following context to answer the user's question. The context may include:
-- Documentation (markdown files)
-- Code files (WDL workflows, Python, Java, etc.)
-- Configuration files
-
-CONTEXT:
-{context}
-
-QUESTION: {user_question}
-
-INSTRUCTIONS:
-- Answer based on the provided context
-- For code-related questions, quote relevant code snippets with line references
-- When referencing code, mention the file name and what the code does
-- If looking for tool versions or specific commands, check both code and documentation
-- For WDL workflows: look for task definitions, runtime blocks, modules and docker images
-- For version questions: check modules, docker images, runtime requirements, and dependency lists
-- If context lacks information, clearly state what's missing
-- Be specific and technical when appropriate
-
-ANSWER:"""
+agent_manager = AgentManager(vector_service)
 
 @cl.on_chat_start
 async def start():
-    """Initialize the chat session"""
-    # Get collection stats to show user
-    stats = vector_service.get_collection_stats()
-    welcome_msg = f"""Welcome to the RAG Chatbot!
-
-I can answer questions about your documentation using {stats.get('total_chunks', 'many')} indexed document chunks.
-
-Ask me anything about:
-- Infrastructure and systems
-- Workflows and processes  
-- Technical concepts and definitions
-- Any topic covered in your documentation
-
-Try asking: "What is Shesmu?" or "How does the infrastructure work?"
-"""
+    """Initialize the chat session with multi-agent support"""
+    # Store agent manager in user session
+    cl.user_session.set("agent_manager", agent_manager)
+    
+    # Send welcome message with agent information
+    welcome_msg = agent_manager.get_welcome_message()
     await cl.Message(content=welcome_msg).send()
 
 @cl.on_message
 async def main(message: cl.Message):
-    """Handle user messages with RAG"""
-    user_question = message.content
-    
+    """Handle user messages with multi-agent support"""
     try:
-        await cl.Message(content="🔍 Searching documentation and code...").send()
+        # Get agent manager from session
+        agent_manager = cl.user_session.get("agent_manager")
+        if not agent_manager:
+            await cl.Message(content="❌ Session error. Please refresh the page.").send()
+            return
         
-        search_results = vector_service.search(user_question, n_results=10)
+        user_input = message.content.strip()
         
-        code_results = [r for r in search_results if r['metadata'].get('file_category') == 'code']
-        doc_results = [r for r in search_results if r['metadata'].get('source_type') == 'markdown_document']
+        # Check for agent management commands first
+        command_response = await agent_manager.handle_agent_commands(user_input)
+        if command_response:
+            await cl.Message(content=command_response).send()
+            return
         
-        mixed_results = code_results[:3] + doc_results[:2]
-        if not mixed_results:
-            mixed_results = search_results[:5]
+        # Show processing message
+        current_agent_info = agent_manager.factory.get_current_agent_info(agent_manager.current_agent)
+        processing_msg = f"🔍 {current_agent_info['name']} is processing your request..."
+        await cl.Message(content=processing_msg).send()
         
-        context = format_retrieved_context(mixed_results)
-        rag_prompt = create_rag_prompt(user_question, context)
+        # Process message with current agent
+        response = await agent_manager.process_message(message)
         
-        # Send generating message
-        await cl.Message(content="Generating response...").send()
-        
-        # Get LLM response
-        response = await llm.ainvoke(rag_prompt)
-        
-        # Prepare enhanced source information
-        sources_info = "\n\n**Sources:**\n"
-        for i, result in enumerate(mixed_results, 1):
-            source_file = result['metadata'].get('source_file', 'Unknown')
-            repo_name = result['metadata'].get('repo_name', '')
-            language = result['metadata'].get('language', '')
-            similarity = result['similarity']
-            
-            source_desc = f"{repo_name}/{source_file}" if repo_name else source_file
-            if language:
-                source_desc += f" ({language})"
-            
-            sources_info += f"{i}. {source_desc} - relevance: {similarity:.2f}\n"
-        
-        # Send final response
-        final_response = response.content + sources_info
-        await cl.Message(content=final_response).send()
+        # Send the response
+        await cl.Message(content=response).send()
         
     except Exception as e:
-        error_msg = f"❌ Error processing your question: {str(e)}"
+        error_msg = f"❌ Error processing your request: {str(e)}"
         await cl.Message(content=error_msg).send()
         
+        # Print traceback for debugging
         import traceback
         traceback.print_exc()
 
+@cl.on_chat_end
+async def end():
+    """Clean up when chat session ends"""
+    # Clear any persistent state if needed
+    pass
+
+async def switch_agent_programmatically(agent_type: str) -> bool:
+    """Switch agent programmatically from code"""
+    try:
+        agent_manager = cl.user_session.get("agent_manager")
+        if agent_manager:
+            from rag_chatbot.agent.agent_config import AgentType
+            agent_type_enum = AgentType(agent_type)
+            agent_manager.current_agent = agent_manager.factory.switch_agent(agent_type_enum)
+            return True
+    except Exception as e:
+        print(f"Error switching agent: {e}")
+        return False
+    return False
+
+def configure_agents_from_env():
+    """Configure agents based on environment variables"""
+    # Allow environment variable overrides
+    if hasattr(settings, 'default_agent'):
+        print(f"Using default agent from settings: {settings.default_agent}")
+    
+    if hasattr(settings, 'enable_code_execution'):
+        print(f"Code execution enabled: {settings.enable_code_execution}")
+    
+    # Add any other environment-based configurations here
+
 if __name__ == "__main__":
-    cl.run()
+    # Configure from environment
+    configure_agents_from_env()
+    
+    # Run the Chainlit app
+    cl.run(
+        host=getattr(settings, 'host', "0.0.0.0"),
+        port=getattr(settings, 'port', 8000),
+        debug=getattr(settings, 'debug', False)
+    )
