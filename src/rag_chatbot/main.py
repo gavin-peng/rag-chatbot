@@ -44,6 +44,7 @@ def format_retrieved_context(results: List[Dict[str, Any]]) -> str:
         )
     
     return "\n---\n".join(context_parts)
+
 def detect_query_intent(query: str) -> Dict[str, Any]:
     """Detect what the user is asking about"""
     query_lower = query.lower()
@@ -79,7 +80,7 @@ def detect_query_intent(query: str) -> Dict[str, Any]:
     return intent
 
 def create_rag_prompt(user_question: str, context: str) -> str:
-    """Create an enhanced prompt that handles both documentation and code"""
+    """Create a prompt that handles both documentation and code"""
     return f"""You are a helpful technical assistant specializing in bioinformatics pipelines, workflows, and code.
 
 Use the following context to answer the user's question. The context may include:
@@ -97,8 +98,8 @@ INSTRUCTIONS:
 - For code-related questions, quote relevant code snippets with line references
 - When referencing code, mention the file name and what the code does
 - If looking for tool versions or specific commands, check both code and documentation
-- For WDL workflows: look for task definitions, runtime blocks, and docker images
-- For version questions: check docker images, runtime requirements, and dependency lists
+- For WDL workflows: look for task definitions, runtime blocks, modules and docker images
+- For version questions: check modules, docker images, runtime requirements, and dependency lists
 - If context lacks information, clearly state what's missing
 - Be specific and technical when appropriate
 
@@ -129,48 +130,22 @@ async def main(message: cl.Message):
     user_question = message.content
     
     try:
-        # Detect query intent
-        intent = detect_query_intent(user_question)
-        
-        # Send initial thinking message
         await cl.Message(content="🔍 Searching documentation and code...").send()
         
-        # Search with more results if it's a code question
-        n_results = 15 if intent['is_code_question'] or intent['is_version_question'] else 10
-        search_results = vector_service.search(user_question, n_results=n_results)
+        search_results = vector_service.search(user_question, n_results=10)
         
-        # Filter by language if detected
-        if intent['language_hints']:
-            lang_results = [r for r in search_results if r['metadata'].get('language') in intent['language_hints']]
-            if lang_results:
-                search_results = lang_results + [r for r in search_results if r not in lang_results]
+        code_results = [r for r in search_results if r['metadata'].get('file_category') == 'code']
+        doc_results = [r for r in search_results if r['metadata'].get('source_type') == 'markdown_document']
         
-        # Prioritize code results for code questions
-        if intent['is_code_question'] or intent['is_version_question']:
-            code_results = [r for r in search_results if r['metadata'].get('file_category') == 'code']
-            doc_results = [r for r in search_results if r['metadata'].get('file_category') != 'code']
-            mixed_results = code_results[:4] + doc_results[:1]  # Heavily favor code
-        else:
-            doc_results = [r for r in search_results if r['metadata'].get('source_type') == 'markdown_document']
-            code_results = [r for r in search_results if r['metadata'].get('source_type') == 'repository']
-            mixed_results = code_results[:2] + doc_results[:3]  # Balanced mix
-        
-        # Ensure we have at least some results
-        if not mixed_results and search_results:
+        mixed_results = code_results[:3] + doc_results[:2]
+        if not mixed_results:
             mixed_results = search_results[:5]
         
-        # Show what we found
-        result_summary = f"Found {len([r for r in search_results if r['metadata'].get('file_category') == 'code'])} code files and {len([r for r in search_results if r['metadata'].get('source_type') == 'markdown_document'])} documentation files"
-        await cl.Message(content=f"📊 {result_summary}").send()
-        
-        # Format context for LLM
         context = format_retrieved_context(mixed_results)
-        
-        # Create RAG prompt
         rag_prompt = create_rag_prompt(user_question, context)
         
         # Send generating message
-        await cl.Message(content="💭 Generating response...").send()
+        await cl.Message(content="Generating response...").send()
         
         # Get LLM response
         response = await llm.ainvoke(rag_prompt)

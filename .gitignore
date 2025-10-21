@@ -3,7 +3,7 @@ __pycache__/
 *.pyo
 *.pyd
 .Python
-./vscode
+.vscode
 env/
 venv/
 .venv/
