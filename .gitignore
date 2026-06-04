@@ -9,12 +9,10 @@ venv/
 .venv/
 .env
 .env.dev
-./data
+data/
 .DS_Store
 *.db
 chroma_db/
-data/repositories/*
-!data/repositories/.gitkeep
 .pytest_cache/
 .mypy_cache/
 .coverage
@@ -22,3 +20,4 @@ dist/
 build/
 *.egg-info/
 .jupyter/
+.gitignore
